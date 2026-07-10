@@ -24,9 +24,6 @@ run_analyzer.py — OSQA主入口程序
   --open-sky       使用开阔天空预设配置
   --debug          启用调试模式
   --vis            启用可视化输出
-
-Author: Claude Code
-Date: 2026-07-02
 """
 
 import sys
