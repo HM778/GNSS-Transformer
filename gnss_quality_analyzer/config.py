@@ -118,6 +118,15 @@ class OSQAConfig:
     # 是否启用可视化（注意力矩阵热力图等）
     visualization: bool = False
 
+    # ==================== gnssfgo 文件交换配置 ====================
+    # gnssfgo 写入 JSONL 输入文件且 OSQA 写入输出的目录/路径
+    # gnssfgo JSONL 模式下的输入文件（gnssfgo → OSQA）
+    gnssfgo_input_path: str = "./osqa_input.jsonl"
+    # gnssfgo JSONL 模式下的输出文件（OSQA → gnssfgo）
+    gnssfgo_output_path: str = "./osqa_output.jsonl"
+    # gnssfgo JSONL 模式下读取新数据的轮询间隔（秒）
+    gnssfgo_poll_interval_s: float = 0.1
+
     # ==================== 在线学习配置 ====================
     # 是否启用在线微调（使用FGO残差反馈调整投影矩阵）
     online_finetune: bool = False

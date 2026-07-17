@@ -253,6 +253,106 @@ class FeatureExtractor:
 
         return (features - centers) / (scales + self.epsilon)
 
+    def extract_from_precomputed(self, sat_data: dict,
+                                 prev_elevation: Optional[float] = None,
+                                 dt: Optional[float] = None) -> np.ndarray:
+        """
+        从 gnssfgo 预计算数据直接构造 8 维特征向量
+
+        与 extract_single() 的区别:
+        - 不需要 RawObservation 对象，直接使用 dict
+        - 所有值来自 gnssfgo 预计算，不重复计算
+        - 跳过 SPP、星历解析等 gnssfgo 已完成的工作
+
+        Args:
+            sat_data: gnssfgo 导出的单颗卫星数据字典 (JSON 解析后的 dict)
+                      包含: snr_l1, elevation, azimuth, psr_residual_l1,
+                      tr_dd_cp_residual, lock_count_l1 等字段
+            prev_elevation: 该卫星上一 epoch 的仰角（用于计算变化率），可选
+            dt: 时间间隔（秒），用于计算变化率，可选
+
+        Returns:
+            8 维特征向量 (np.float32)
+        """
+        features = np.zeros(8, dtype=np.float32)
+
+        # [0] SNR_norm: 使用 gnssfgo 导出的 L1 SNR
+        snr = float(sat_data.get('snr_l1', 0))
+        features[0] = snr / 45.0
+
+        # [1] elevation_sin: 使用 gnssfgo 计算好的仰角（度）
+        elev = float(sat_data.get('elevation', 0))
+        features[1] = np.sin(np.deg2rad(elev))
+
+        # [2][3] azimuth_cos/sin: 使用 gnssfgo 计算好的方位角（度）
+        azim = float(sat_data.get('azimuth', 0))
+        azim_rad = np.deg2rad(azim)
+        features[2] = np.cos(azim_rad)
+        features[3] = np.sin(azim_rad)
+
+        # [4] pseudorange_residual: SPP 伪距残差 (已由 gnssfgo 计算)
+        psr_res = float(sat_data.get('psr_residual_l1', 0))
+        features[4] = psr_res / 20.0
+
+        # [5] carrier_residual: 使用 TR DD 载波残差 (gnssfgo 因子残差)
+        # 或伪距因子后验残差
+        cp_res = float(sat_data.get('tr_dd_cp_residual', 0))
+        if cp_res == 0.0:
+            cp_res = float(sat_data.get('psr_factor_residual', 0))
+        features[5] = cp_res / 0.1
+
+        # [6] lock_count_norm: 使用 gnssfgo 统计的 L1 锁定计数
+        lock = float(sat_data.get('lock_count_l1', 0))
+        if lock > 0:
+            features[6] = min(np.log2(lock + 1) / 10.0, 1.0)
+        else:
+            features[6] = 0.0
+
+        # [7] elevation_rate: 仰角变化率（需要历史数据）
+        if prev_elevation is not None and dt is not None and dt > 0.01:
+            elev_rate = (elev - prev_elevation) / dt
+            features[7] = np.clip(elev_rate / 0.02, -1.0, 1.0)
+        else:
+            features[7] = 0.0
+
+        self.extraction_count += 1
+        return features
+
+    def extract_batch_from_precomputed(self, satellite_data_list: list,
+                                       satellite_histories: Optional[Dict[str, List[tuple]]] = None
+                                       ) -> Tuple[np.ndarray, List[str]]:
+        """
+        从 gnssfgo 预计算数据列表中批量提取特征矩阵
+
+        Args:
+            satellite_data_list: dict 列表，每个 dict 是 gnssfgo 导出的一颗卫星数据
+            satellite_histories: 卫星历史数据字典，key=PRN, value=[(timestamp, elevation), ...]
+
+        Returns:
+            features: (N, 8) 特征矩阵
+            prns: 卫星 PRN 列表
+        """
+        N = len(satellite_data_list)
+        features = np.zeros((N, 8), dtype=np.float32)
+        prns = []
+
+        for i, sat_data in enumerate(satellite_data_list):
+            prn = sat_data.get('prn', f'?_{i}')
+            prns.append(prn)
+
+            # 查找历史数据用于仰角变化率
+            prev_elev = None
+            dt = None
+            if satellite_histories and prn in satellite_histories:
+                history = satellite_histories[prn]
+                if len(history) >= 1:
+                    prev_time, prev_elev = history[-1]
+                    dt = sat_data.get('timestamp', 0.0) - prev_time if prev_time else None
+
+            features[i] = self.extract_from_precomputed(sat_data, prev_elev, dt)
+
+        return features, prns
+
     def get_feature_names(self) -> List[str]:
         """获取特征名称列表（用于可视化和调试）"""
         return [

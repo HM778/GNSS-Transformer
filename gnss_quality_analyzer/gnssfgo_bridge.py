@@ -293,6 +293,76 @@ class ROSDataProvider(GNSSDataProvider):
         return None
 
 
+class GNSSFGODataProvider(GNSSDataProvider):
+    """
+    gnssfgo JSONL 文件数据提供者
+
+    从 gnssfgo 导出的 JSONL 文件读取预计算数据。
+    与 FileDataProvider 不同：
+    - 输入格式为 JSONL（每行一个 epoch JSON 对象）
+    - 包含 gnssfgo 预计算的卫星位置、残差、校正等数据
+    - 轮询文件尾部新行以支持流式在线处理
+    - 不需要 CSV 解析、星历处理或大气校正
+
+    gnssfgo 以 append-only 方式写入 osqa_input.jsonl，
+    OSQA 读取新行并处理每个 epoch。
+    """
+
+    def __init__(self, input_path: str, output_path: str):
+        """
+        Args:
+            input_path: gnssfgo → OSQA JSONL 输入文件路径
+            output_path: OSQA → gnssfgo JSONL 输出文件路径
+        """
+        self.input_path = input_path
+        self.output_path = output_path
+        self._running = False
+        self._reader = None  # 延迟导入
+
+    def start(self):
+        """启动数据读取器"""
+        from gnss_quality_analyzer.gnssfgo_data_reader import GNSSFGODataReader
+        self._reader = GNSSFGODataReader(self.input_path, self.output_path)
+        self._reader.start()
+        self._running = True
+        print(f"[GNSSFGODataProvider] Polling {self.input_path} for new epochs...")
+
+    def stop(self):
+        """停止数据读取"""
+        self._running = False
+        if self._reader:
+            self._reader.stop()
+
+    def get_next_epoch(self, timeout: float = 1.0) -> Optional[dict]:
+        """
+        获取下一个 epoch 的预计算数据
+
+        Args:
+            timeout: 最大等待时间（秒）
+
+        Returns:
+            epoch 数据字典，包含 'timestamp', 'satellites' (list of dict) 等字段
+            超时返回 None
+        """
+        if not self._running or not self._reader:
+            return None
+        return self._reader.read_next_epoch(timeout)
+
+    def write_quality(self, fused_result) -> bool:
+        """
+        将质量评分写回 gnssfgo 输出文件
+
+        Args:
+            fused_result: FusedResult 对象
+
+        Returns:
+            成功返回 True
+        """
+        if not self._reader:
+            return False
+        return self._reader.write_quality_result(fused_result)
+
+
 class QualityPublisher:
     """
     质量分数发布者
@@ -400,24 +470,33 @@ class GNSSFGOBridge:
 
     def setup(self, csv_path: Optional[str] = None,
               ros_mode: bool = True,
-              output_path: Optional[str] = None):
+              output_path: Optional[str] = None,
+              gnssfgo_input_path: Optional[str] = None,
+              gnssfgo_output_path: Optional[str] = None):
         """
         设置通信桥梁
 
         Args:
             csv_path: CSV文件路径（文件模式时需要）
             ros_mode: 是否使用ROS模式
-            output_path: 输出文件路径（可选）
+            output_path: 输出文件路径（可选，CSV/ROS模式）
+            gnssfgo_input_path: gnssfgo JSONL 输入文件路径（gnssfgo JSONL模式）
+            gnssfgo_output_path: gnssfgo JSONL 输出文件路径（gnssfgo JSONL模式）
         """
         # 选择数据提供者
-        if ros_mode and HAS_ROS:
+        if gnssfgo_input_path and gnssfgo_output_path:
+            self.data_provider = GNSSFGODataProvider(
+                gnssfgo_input_path, gnssfgo_output_path
+            )
+            print(f"[GNSSFGOBridge] Using gnssfgo JSONL mode: {gnssfgo_input_path} -> {gnssfgo_output_path}")
+        elif ros_mode and HAS_ROS:
             self.data_provider = ROSDataProvider()
             print("[GNSSFGOBridge] Using ROS mode")
         elif csv_path:
             self.data_provider = FileDataProvider(csv_path)
             print(f"[GNSSFGOBridge] Using file mode: {csv_path}")
         else:
-            raise ValueError("Either ROS mode or csv_path must be specified")
+            raise ValueError("One of gnssfgo_input_path, ROS mode, or csv_path must be specified")
 
         # 创建质量发布者
         ros_topic = "/osqa/signal_quality"
@@ -449,6 +528,9 @@ class GNSSFGOBridge:
 
     def publish_quality(self, fused_result) -> bool:
         """发布质量分数"""
+        # gnssfgo JSONL 模式: 使用 data_provider 的 write_quality
+        if isinstance(self.data_provider, GNSSFGODataProvider):
+            return self.data_provider.write_quality(fused_result)
         if self.quality_publisher:
             return self.quality_publisher.publish(fused_result)
         return False

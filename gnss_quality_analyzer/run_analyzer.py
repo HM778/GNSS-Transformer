@@ -110,11 +110,18 @@ class OSQAAnalyzer:
         self.epoch_count = 0
         self.start_time: Optional[float] = None
 
+        # 保存最近一次图分析结果（用于统计输出）
+        self._last_graph_result = None
+
     def setup(self, csv_path: Optional[str] = None,
               ros_mode: bool = False,
-              output_path: Optional[str] = None):
+              output_path: Optional[str] = None,
+              gnssfgo_input_path: Optional[str] = None,
+              gnssfgo_output_path: Optional[str] = None):
         """设置通信桥梁"""
-        self.bridge.setup(csv_path=csv_path, ros_mode=ros_mode, output_path=output_path)
+        self.bridge.setup(csv_path=csv_path, ros_mode=ros_mode, output_path=output_path,
+                          gnssfgo_input_path=gnssfgo_input_path,
+                          gnssfgo_output_path=gnssfgo_output_path)
 
     def start(self):
         """启动分析器"""
@@ -155,7 +162,13 @@ class OSQAAnalyzer:
         """
         try:
             # ========== 步骤1: 解析原始数据 ==========
-            observations = self._parse_raw_epoch(raw_epoch)
+            # 自动检测数据来源: gnssfgo JSONL (包含 receiver_ecef 字段) vs CSV
+            if raw_epoch.get('receiver_ecef') is not None:
+                # gnssfgo JSONL 模式: 使用预计算数据
+                observations = self._parse_gnssfgo_epoch(raw_epoch)
+            else:
+                # CSV 回放模式
+                observations = self._parse_raw_epoch(raw_epoch)
             if len(observations) == 0:
                 return None
 
@@ -194,6 +207,7 @@ class OSQAAnalyzer:
             graph_result = self.graph_analyzer.analyze(
                 features_norm, elevations, azimuths, prns, residuals
             )
+            self._last_graph_result = graph_result  # 保存供统计使用
 
             # ========== 步骤5: 时序分析 ==========
             temporal_result = self.temporal_analyzer.analyze(
@@ -245,23 +259,65 @@ class OSQAAnalyzer:
         """
         主处理循环
 
-        持续从数据源获取epoch并处理，直到数据结束或收到停止信号。
+        持续从数据源获取epoch并处理，直到收到停止信号(Ctrl+C)。
+        当使用文件输入模式时，持续轮询新数据。
         """
         self.start()
 
         while self.running:
             # 获取下一个epoch
-            raw_epoch = self.bridge.receive_epoch(timeout=1.0)
+            raw_epoch = self.bridge.receive_epoch(timeout=0.5)
             if raw_epoch is None:
-                # 检查是否应该退出
-                if self.epoch_count > 0:
-                    print("[OSQA] No more data, stopping...")
-                break
+                # 没有新数据，短暂休眠后继续轮询
+                # Ctrl+C 会设置 self.running = False
+                if not self.running:
+                    break
+                continue
 
             # 处理
             self.process_epoch(raw_epoch)
 
         self.stop()
+
+    def _parse_gnssfgo_epoch(self, raw_epoch: dict) -> list:
+        """
+        解析 gnssfgo JSONL epoch 数据为 RawObservation 列表
+
+        gnssfgo 导出的数据已包含预计算的:
+        - 卫星 ECEF 位置/速度
+        - 仰角/方位角
+        - 电离层/对流层校正
+        - SPP 伪距残差
+
+        这些值直接用于构造 RawObservation，跳过所有重复计算。
+        """
+        observations = []
+        timestamp = raw_epoch.get('timestamp', 0.0)
+
+        for sat_data in raw_epoch.get('satellites', []):
+            prn = sat_data.get('prn', '?')
+            system = sat_data.get('system', '?')
+
+            obs = RawObservation(
+                prn=prn,
+                system=system,
+                timestamp=timestamp,
+                snr=float(sat_data.get('snr_l1', 0)),
+                elevation=float(sat_data.get('elevation', 0)),
+                azimuth=float(sat_data.get('azimuth', 0)),
+                pseudorange_l1=float(sat_data.get('pseudorange_l1', 0)),
+                pseudorange_l2=float(sat_data.get('pseudorange_l2', 0)),
+                carrier_phase_l1=float(sat_data.get('carrier_phase_l1', 0)),
+                carrier_phase_l2=float(sat_data.get('carrier_phase_l2', 0)),
+                doppler_l1=float(sat_data.get('doppler_l1', 0)),
+                lock_count=int(sat_data.get('lock_count_l1', 0)),
+                lli_flags=int(sat_data.get('lli_l1', 0)),
+                pseudorange_residual=float(sat_data.get('psr_residual_l1', 0)),
+                carrier_residual=float(sat_data.get('tr_dd_cp_residual', 0)),
+            )
+            observations.append(obs)
+
+        return observations
 
     def _parse_raw_epoch(self, raw_epoch: dict) -> list:
         """
@@ -346,14 +402,14 @@ class OSQAAnalyzer:
 
     def get_statistics(self) -> dict:
         """获取所有模块的统计信息"""
+        graph_stats = {}
+        if self._last_graph_result is not None:
+            graph_stats = self.graph_analyzer.get_graph_statistics(self._last_graph_result)
         return {
             "epoch_count": self.epoch_count,
             "memory": self.memory.get_statistics(),
             "transformer": self.transformer_analyzer.get_statistics(),
-            "graph": self.graph_analyzer.get_graph_statistics(
-                # 使用最近的图结果（如果有的话）
-                self.graph_analyzer.prev_features is not None
-            ),
+            "graph": graph_stats,
             "temporal": self.temporal_analyzer.get_statistics(),
             "fusion": self.fusion.get_long_term_stats(),
         }
@@ -375,6 +431,8 @@ def parse_args():
 
     parser.add_argument('--csv', type=str, help='CSV数据文件路径（离线回放模式）')
     parser.add_argument('--ros', action='store_true', help='启用ROS模式')
+    parser.add_argument('--gnssfgo-input', type=str, help='gnssfgo JSONL输入文件路径（gnssfgo集成模式）')
+    parser.add_argument('--gnssfgo-output', type=str, help='gnssfgo JSONL输出文件路径（gnssfgo集成模式）')
     parser.add_argument('--config', type=str, help='配置文件路径（JSON）')
     parser.add_argument('--output', type=str, help='输出文件路径（CSV格式）')
     parser.add_argument('--urban', action='store_true', help='使用城市峡谷预设配置')
@@ -412,6 +470,8 @@ def main():
         csv_path=args.csv,
         ros_mode=args.ros,
         output_path=args.output,
+        gnssfgo_input_path=getattr(args, 'gnssfgo_input', None),
+        gnssfgo_output_path=getattr(args, 'gnssfgo_output', None),
     )
 
     # 注册信号处理（支持Ctrl+C优雅退出）
