@@ -118,6 +118,12 @@ class OSQAConfig:
     # 是否启用可视化（注意力矩阵热力图等）
     visualization: bool = False
 
+    # 可视化刷新间隔（毫秒）
+    visualization_update_interval_ms: int = 200
+
+    # 可视化历史曲线长度（epoch 数）
+    visualization_history_length: int = 100
+
     # ==================== gnssfgo 文件交换配置 ====================
     # gnssfgo 写入 JSONL 输入文件且 OSQA 写入输出的目录/路径
     # gnssfgo JSONL 模式下的输入文件（gnssfgo → OSQA）

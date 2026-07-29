@@ -93,8 +93,9 @@ class FileDataProvider(GNSSDataProvider):
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._epochs: List[dict] = []
-        self._current_idx = 0
-        self._lock = threading.Lock()
+        self._queue: List[dict] = []
+        self._queue_lock = threading.Lock()
+        self._queue_event = threading.Event()
 
     def start(self):
         """加载CSV并启动回放"""
@@ -151,9 +152,10 @@ class FileDataProvider(GNSSDataProvider):
 
         start_time = time.time()
         data_start_ts = self._epochs[0]['timestamp']
+        current_idx = 0
 
-        while self._running and self._current_idx < len(self._epochs):
-            epoch = self._epochs[self._current_idx]
+        while self._running and current_idx < len(self._epochs):
+            epoch = self._epochs[current_idx]
 
             # 计算应该等待的时间
             elapsed_data = epoch['timestamp'] - data_start_ts
@@ -163,13 +165,21 @@ class FileDataProvider(GNSSDataProvider):
             if sleep_time > 0:
                 time.sleep(min(sleep_time, 1.0))  # 最多等1秒
 
-            self._current_idx += 1
+            with self._queue_lock:
+                self._queue.append(epoch)
+                self._queue_event.set()
+            current_idx += 1
 
     def get_next_epoch(self, timeout: float = 1.0) -> Optional[dict]:
         """获取下一个epoch"""
-        with self._lock:
-            if self._current_idx < len(self._epochs):
-                return self._epochs[self._current_idx]
+        if self._queue_event.wait(timeout=timeout):
+            with self._queue_lock:
+                if self._queue:
+                    epoch = self._queue.pop(0)
+                    if not self._queue:
+                        self._queue_event.clear()
+                    return epoch
+                self._queue_event.clear()
         return None
 
 

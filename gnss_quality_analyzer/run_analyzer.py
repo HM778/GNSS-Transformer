@@ -51,6 +51,7 @@ from gnss_quality_analyzer.graph_analyzer import GraphAnalyzer
 from gnss_quality_analyzer.temporal_analyzer import TemporalAnalyzer
 from gnss_quality_analyzer.quality_fusion import QualityFusion
 from gnss_quality_analyzer.gnssfgo_bridge import GNSSFGOBridge
+from gnss_quality_analyzer.visualizer import Visualizer
 
 
 class OSQAAnalyzer:
@@ -105,6 +106,17 @@ class OSQAAnalyzer:
 
         self.bridge = GNSSFGOBridge(config)
 
+        # 实时可视化器 (仅当配置启用时创建)
+        # 如果你想要 OSQA 终端也用 compact 双子图，需要把 run_analyzer.py:111-114 的 Visualizer(...) 初始化加上 layout="compact"
+        self.visualizer: Optional[Visualizer] = None
+        if config.visualization:
+            self.visualizer = Visualizer(
+                history_length=config.visualization_history_length,
+                update_interval_ms=config.visualization_update_interval_ms,
+            )
+            if self.visualizer is None or not getattr(self.visualizer, '_available', False):
+                print("[OSQA] Warning: visualization requested but failed to initialize.")
+
         # 运行状态
         self.running = False
         self.epoch_count = 0
@@ -135,6 +147,8 @@ class OSQAAnalyzer:
         """停止分析器"""
         self.running = False
         self.bridge.stop()
+        if self.visualizer is not None:
+            self.visualizer.close()
         elapsed = time.time() - (self.start_time or time.time())
         print(f"[OSQA] Stopped. Processed {self.epoch_count} epochs in {elapsed:.1f}s "
               f"({self.epoch_count / max(elapsed, 0.01):.1f} Hz)")
@@ -239,6 +253,10 @@ class OSQAAnalyzer:
 
             # ========== 步骤8: 发布结果 ==========
             self.bridge.publish_quality(fused)
+
+            # ========== 步骤9: 实时可视化 ==========
+            if self.visualizer is not None:
+                self.visualizer.update(fused)
 
             self.epoch_count += 1
 

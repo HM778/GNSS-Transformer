@@ -26,6 +26,14 @@ from .temporal_analyzer import TemporalAnalyzer
 from .quality_fusion import QualityFusion
 from .gnssfgo_bridge import GNSSFGOBridge
 
+# Compatibility: the Visualizer class now lives in visualize_output.py.
+# Register it under the old module name so that code doing
+#   from gnss_quality_analyzer.visualizer import Visualizer
+# continues to work even if visualizer.py was deleted.
+import sys
+from . import visualize_output
+sys.modules['gnss_quality_analyzer.visualizer'] = visualize_output
+
 __all__ = [
     "OSQAConfig",
     "MemoryBuffer",
