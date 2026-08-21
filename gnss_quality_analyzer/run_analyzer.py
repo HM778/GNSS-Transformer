@@ -24,9 +24,8 @@ run_analyzer.py — OSQA主入口程序
   --open-sky       使用开阔天空预设配置
   --debug          启用调试模式
   --vis            启用可视化输出
-
-Author: Claude Code
-Date: 2026-07-02
+  --permissive     使用宽松学习预设配置（降低误判率）
+  --layout         可视化布局：full (2x2 四子图) 或 compact (1x2 双子图)
 """
 
 import sys
@@ -42,7 +41,8 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gnss_quality_analyzer.config import (
-    OSQAConfig, get_urban_config, get_open_sky_config, get_default_config
+    OSQAConfig, get_urban_config, get_open_sky_config, get_default_config,
+    get_permissive_config,
 )
 from gnss_quality_analyzer.memory_buffer import MemoryBuffer, EpochData, SatelliteSample
 from gnss_quality_analyzer.feature_extractor import FeatureExtractor, RawObservation
@@ -51,7 +51,7 @@ from gnss_quality_analyzer.graph_analyzer import GraphAnalyzer
 from gnss_quality_analyzer.temporal_analyzer import TemporalAnalyzer
 from gnss_quality_analyzer.quality_fusion import QualityFusion
 from gnss_quality_analyzer.gnssfgo_bridge import GNSSFGOBridge
-from gnss_quality_analyzer.visualizer import Visualizer
+from gnss_quality_analyzer.visualize_output import Visualizer
 
 
 class OSQAAnalyzer:
@@ -113,6 +113,7 @@ class OSQAAnalyzer:
             self.visualizer = Visualizer(
                 history_length=config.visualization_history_length,
                 update_interval_ms=config.visualization_update_interval_ms,
+                layout=config.visualization_layout,
             )
             if self.visualizer is None or not getattr(self.visualizer, '_available', False):
                 print("[OSQA] Warning: visualization requested but failed to initialize.")
@@ -205,6 +206,7 @@ class OSQAAnalyzer:
             azimuths = np.array([obs.azimuth for obs in observations])
             snrs = np.array([obs.snr for obs in observations])
             residuals = np.array([obs.pseudorange_residual for obs in observations])
+            carrier_residuals = np.array([obs.carrier_residual for obs in observations])
             systems = [obs.system for obs in observations]
             mask = np.ones(len(observations), dtype=bool)
 
@@ -243,6 +245,7 @@ class OSQAAnalyzer:
                 elevation_values=elevations,
                 azimuth_values=azimuths,
                 residual_values=residuals,
+                carrier_residual_values=carrier_residuals,
             )
 
             # ========== 步骤7: 更新记忆库 ==========
@@ -455,8 +458,11 @@ def parse_args():
     parser.add_argument('--output', type=str, help='输出文件路径（CSV格式）')
     parser.add_argument('--urban', action='store_true', help='使用城市峡谷预设配置')
     parser.add_argument('--open-sky', action='store_true', help='使用开阔天空预设配置')
+    parser.add_argument('--permissive', action='store_true', help='使用宽松学习预设配置（降低误判率）')
     parser.add_argument('--debug', action='store_true', help='启用调试输出')
     parser.add_argument('--vis', action='store_true', help='启用可视化输出')
+    parser.add_argument('--layout', type=str, choices=['full', 'compact'],
+                        default='full', help='可视化布局：full (2x2 四子图) 或 compact (1x2 双子图)')
 
     return parser.parse_args()
 
@@ -472,6 +478,8 @@ def main():
         config = get_urban_config()
     elif args.open_sky:
         config = get_open_sky_config()
+    elif args.permissive:
+        config = get_permissive_config()
     else:
         config = get_default_config()
 
@@ -479,6 +487,8 @@ def main():
         config.debug = True
     if args.vis:
         config.visualization = True
+    if args.layout:
+        config.visualization_layout = args.layout
 
     # 创建分析器
     analyzer = OSQAAnalyzer(config)

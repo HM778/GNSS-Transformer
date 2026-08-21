@@ -65,9 +65,6 @@ transformer_analyzer.py — Transformer自注意力信号质量分析器
        memory_sim[i] = max(cosine_similarity(features[i], prototype) for prototype in memory)
   6. 质量分数:
      quality[i] = sigmoid(attended_by[i] * (1-entropy[i]/max_entropy) * memory_sim[i])
-
-Author: Claude Code
-Date: 2026-07-02
 """
 
 import numpy as np

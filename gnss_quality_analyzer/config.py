@@ -56,8 +56,8 @@ class OSQAConfig:
     attention_temperature: float = 1.0
 
     # 被关注度阈值 — 低于此值的卫星被视为"孤立"（可能是异常）
-    # 范围[0, 1]，推荐0.3-0.5
-    isolation_threshold: float = 0.4
+    # 范围[0, 1]，越低越宽松（越不容易被孤立）
+    isolation_threshold: float = 0.3
 
     # ==================== 图结构分析配置 ====================
     # 图边构建的角度阈值（度）
@@ -68,7 +68,7 @@ class OSQAConfig:
 
     # 图一致性分析的温度参数
     # 温度越高，对不一致的容忍度越高
-    graph_consistency_temperature: float = 0.5
+    graph_consistency_temperature: float = 0.7
 
     # GCN消息传递的层数（1层=只看直接邻居，2层=看邻居的邻居）
     gcn_num_layers: int = 2
@@ -84,22 +84,24 @@ class OSQAConfig:
     temporal_var_decay: float = 0.9
 
     # 马氏距离的异常阈值（超过此值视为突变）
-    # 3.0 ≈ 3个标准差（对于正态分布，3sigma外概率~0.3%）
-    temporal_anomaly_threshold: float = 3.0
+    # 3.5 ≈ 3.5个标准差，更宽松，避免没有充分历史时大量误判
+    temporal_anomaly_threshold: float = 3.5
 
     # ==================== 融合配置 ====================
-    # 融合模式: 'geometric' (几何平均, 默认), 'multiply' (直接乘), 'min' (最小值), 'weighted' (加权平均)
-    fusion_mode: str = "geometric"
+    # 融合模式: 'geometric' (几何平均), 'multiply' (直接乘), 'min' (最小值), 'weighted' (加权平均, 默认)
+    # 加权平均更不容易因为一个分析器低分就拉低整体，适合在线学习初期
+    fusion_mode: str = "weighted"
 
     # 加权平均模式下的权重（若启用）
+    # Temporal 权重较低，避免历史不足时拖低正常卫星
     fusion_weights: Dict[str, float] = field(default_factory=lambda: {
-        "transformer": 0.4,
-        "graph": 0.35,
-        "temporal": 0.25,
+        "transformer": 0.45,
+        "graph": 0.40,
+        "temporal": 0.15,
     })
 
     # 质量分数阈值 — 低于此值的信号被视为不可信
-    quality_threshold: float = 0.3
+    quality_threshold: float = 0.25
 
     # ==================== 系统配置 ====================
     # ROS topic名称
@@ -123,6 +125,9 @@ class OSQAConfig:
 
     # 可视化历史曲线长度（epoch 数）
     visualization_history_length: int = 100
+
+    # 可视化布局："full" (2x2 四子图) 或 "compact" (1x2 双子图)
+    visualization_layout: str = "full"
 
     # ==================== gnssfgo 文件交换配置 ====================
     # gnssfgo 写入 JSONL 输入文件且 OSQA 写入输出的目录/路径
@@ -172,16 +177,20 @@ def get_urban_config() -> OSQAConfig:
     """
     城市峡谷场景的预设配置
 
-    城市环境中多路径严重，需要更严格的异常检测：
-    - 注意力温度更低（更敏感）
-    - 质量阈值更高
-    - 图一致性温度更低（对不一致更敏感）
+    城市环境中多路径严重，但仍需避免把所有卫星都判为异常：
+    - 注意力温度适中（不过度敏感）
+    - 质量阈值较默认略严，但不会过低
+    - 图一致性温度适中（允许一定程度的不一致）
+    - 融合使用加权平均，避免单一分析器拉低全部
     """
     return OSQAConfig(
-        attention_temperature=0.8,
-        graph_consistency_temperature=0.3,
-        quality_threshold=0.35,
-        temporal_anomaly_threshold=2.5,
+        attention_temperature=1.0,
+        graph_consistency_temperature=0.5,
+        quality_threshold=0.25,
+        temporal_anomaly_threshold=3.0,
+        isolation_threshold=0.3,
+        fusion_mode="weighted",
+        fusion_weights={"transformer": 0.45, "graph": 0.40, "temporal": 0.15},
     )
 
 
@@ -196,10 +205,34 @@ def get_open_sky_config() -> OSQAConfig:
     """
     return OSQAConfig(
         window_size=100,
-        attention_temperature=1.2,
-        graph_consistency_temperature=0.8,
+        attention_temperature=1.3,
+        graph_consistency_temperature=0.9,
         quality_threshold=0.2,
         temporal_anomaly_threshold=4.0,
+        isolation_threshold=0.25,
+        fusion_mode="weighted",
+        fusion_weights={"transformer": 0.45, "graph": 0.40, "temporal": 0.15},
+    )
+
+
+def get_permissive_config() -> OSQAConfig:
+    """
+    宽松学习模式预设配置
+
+    当大量正常卫星被误判为 suspect/unreliable 时使用：
+    - 阈值更宽，Trusted 门槛更低
+    - 温度更高，对异常更宽容
+    - Temporal 权重进一步降低，避免历史不足时过度惩罚
+    - 融合使用加权平均而非几何平均
+    """
+    return OSQAConfig(
+        attention_temperature=1.3,
+        graph_consistency_temperature=0.9,
+        quality_threshold=0.2,
+        temporal_anomaly_threshold=4.0,
+        isolation_threshold=0.25,
+        fusion_mode="weighted",
+        fusion_weights={"transformer": 0.45, "graph": 0.40, "temporal": 0.15},
     )
 
 

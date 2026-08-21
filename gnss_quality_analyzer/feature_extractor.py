@@ -28,9 +28,6 @@ feature_extractor.py — 特征提取器
   例如：(sin(350°), cos(350°)) ≈ (-0.17, 0.98)
        (sin(10°), cos(10°))   ≈ (0.17, 0.98)
        两者接近，正确反映了它们之间的真实关系
-
-Author: Claude Code
-Date: 2026-07-02
 """
 
 import numpy as np
@@ -161,10 +158,12 @@ class FeatureExtractor:
         # 残差通常在[-20, 20]米范围内，除以20做初步缩放
         features[4] = obs.pseudorange_residual / 20.0
 
-        # [5] 载波相位残差（若可用）
-        # 载波相位精度约1-2mm，残差通常很小
+        # [5] 载波相位变化残差（dop_cp，单位：周）
+        # 正常载波相位变化残差在 [-10, 10] 周以内，极端野值可达数百万周。
+        # 这里先做硬截断，再按 50 周归一化到 [-1, 1]。
         if obs.has_carrier_phase:
-            features[5] = obs.carrier_residual / 0.1  # 缩放到米量级
+            cr = np.clip(obs.carrier_residual, -50.0, 50.0)
+            features[5] = cr / 50.0
         else:
             features[5] = 0.0  # 不可用时置零
 

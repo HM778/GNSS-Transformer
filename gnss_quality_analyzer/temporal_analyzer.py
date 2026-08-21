@@ -48,8 +48,6 @@ temporal_analyzer.py — 时序一致性分析器
   3. 基于马氏距离计算质量分数
   4. 递减异常计数（连续异常会降低分数）
 
-Author: Claude Code
-Date: 2026-07-02
 """
 
 import numpy as np

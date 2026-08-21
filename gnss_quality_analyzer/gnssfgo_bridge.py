@@ -29,8 +29,6 @@ gnssfgo需要订阅 /osqa/signal_quality 并使用质量分数调整因子权重
   2. 对每颗卫星，将 sqrt_info *= quality_score
   3. 可选：完全跳过 quality_score < threshold 的卫星
 
-Author: Claude Code
-Date: 2026-07-02
 """
 
 import json

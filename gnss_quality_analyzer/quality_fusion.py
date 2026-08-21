@@ -34,8 +34,6 @@ quality_fusion.py — 多分析器分数融合
 - 信号可信度分级（trusted/suspect/unreliable）
 - 可视化数据（用于调试和展示）
 
-Author: Claude Code
-Date: 2026-07-02
 """
 
 import numpy as np
@@ -84,6 +82,7 @@ class SatelliteQuality:
     elevation: float = 0.0
     azimuth: float = 0.0
     pseudorange_residual: float = 0.0
+    carrier_residual: float = 0.0  # 载波相位变化残差（dop_cp，周）
 
     def to_dict(self) -> dict:
         """转换为字典（便于JSON序列化）"""
@@ -102,6 +101,7 @@ class SatelliteQuality:
             "elevation": round(self.elevation, 1),
             "azimuth": round(self.azimuth, 1),
             "pseudorange_residual": round(self.pseudorange_residual, 3),
+            "carrier_residual": round(self.carrier_residual, 3),
         }
 
 
@@ -206,6 +206,7 @@ class QualityFusion:
              elevation_values: Optional[np.ndarray] = None,
              azimuth_values: Optional[np.ndarray] = None,
              residual_values: Optional[np.ndarray] = None,
+             carrier_residual_values: Optional[np.ndarray] = None,
              ) -> FusedResult:
         """
         融合三个分析器的质量分数
@@ -223,7 +224,8 @@ class QualityFusion:
             snr_values: (N,) SNR值（可选）
             elevation_values: (N,) 仰角（可选）
             azimuth_values: (N,) 方位角（可选）
-            residual_values: (N,) 伪距残差（可选）
+            residual_values: (N,) 伪距残差（可选，米）
+            carrier_residual_values: (N,) 载波相位变化残差（可选，周）
 
         Returns:
             FusedResult: 融合结果
@@ -253,6 +255,18 @@ class QualityFusion:
         else:
             raise ValueError(f"Unknown fusion mode: {self.mode}")
 
+        # ---- 载波相位变化残差（dop_cp）硬惩罚 ----
+        # dop_cp 残差直接反映 FGO 优化后载波相位因子的符合程度。
+        # |residual| > 5 周开始惩罚，> 100 周时最多把分数压低到原来的 10%。
+        if carrier_residual_values is not None and len(carrier_residual_values) == N:
+            cr = np.abs(np.asarray(carrier_residual_values, dtype=float))
+            penalty = np.clip((cr - 5.0) / 95.0, 0.0, 0.9)
+            q_final = q_final * (1.0 - penalty)
+            # 极大残差（> 200 周）直接加入异常标记
+            for i in range(N):
+                if cr[i] > 200.0:
+                    temporal_flags[i].append("extreme_carrier_residual")
+
         # 构建每颗卫星的完整质量评估
         satellites = []
         for i in range(N):
@@ -266,7 +280,8 @@ class QualityFusion:
             all_flags = list(dict.fromkeys(all_flags))
 
             # 判断可信度等级
-            if q_final[i] >= 0.7:
+            # 放宽 Trusted 门槛：>=0.6 即可信任（原 0.7 太严，容易把所有卫星判为 suspect）
+            if q_final[i] >= 0.6:
                 trust_level = TrustLevel.TRUSTED
             elif q_final[i] >= self.quality_threshold:
                 trust_level = TrustLevel.SUSPECT
@@ -286,6 +301,7 @@ class QualityFusion:
                 elevation=float(elevation_values[i]) if elevation_values is not None else 0.0,
                 azimuth=float(azimuth_values[i]) if azimuth_values is not None else 0.0,
                 pseudorange_residual=float(residual_values[i]) if residual_values is not None else 0.0,
+                carrier_residual=float(carrier_residual_values[i]) if carrier_residual_values is not None else 0.0,
             )
             satellites.append(sat)
 

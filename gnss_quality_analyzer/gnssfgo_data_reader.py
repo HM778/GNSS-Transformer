@@ -28,8 +28,6 @@ gnssfgo_data_reader.py — gnssfgo JSONL 数据读写器
 gnssfgo 以 append-only 方式写入新行到 osqa_input.jsonl，
 OSQA 从尾部读取新行。
 
-Author: Claude Code
-Date: 2026-07-17
 """
 
 import os

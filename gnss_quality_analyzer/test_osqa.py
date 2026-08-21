@@ -13,9 +13,6 @@ test_osqa.py — OSQA 集成测试脚本
   5. 时序异常检测
   6. 分数融合
   7. 端到端pipeline
-
-Author: Claude Code
-Date: 2026-07-02
 """
 
 import sys

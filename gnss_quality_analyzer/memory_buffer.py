@@ -15,8 +15,6 @@ memory_buffer.py — 滑动窗口记忆库
   2. epoch_buffer: 环形缓冲区，存储最近N个epoch的完整数据
   3. per_sat_stats: 每颗卫星的运行统计（在线更新的均值和标准差）
 
-Author: Claude Code
-Date: 2026-07-02
 """
 
 import numpy as np

@@ -47,8 +47,6 @@ graph_analyzer.py — 图结构几何分析器
 3. 一致性检查: 原始特征 vs 邻居聚合特征的差异
 4. 轨迹预测: 一阶外推 + 图约束平滑
 
-Author: Claude Code
-Date: 2026-07-02
 """
 
 import numpy as np
