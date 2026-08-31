@@ -142,8 +142,12 @@ class GNSSFGODataReader:
             写入成功返回 True
         """
         # 构建 gnssfgo 可读的 JSON 输出格式
+        # time_frame 必须写出: gnssfgo 端用 readLatestQualityScores(path, time_frame)
+        # 按历元匹配评分, 缺失该字段会导致匹配永远失败、评分被静默丢弃
+        # (time_frame = gps 时间 × 10, 与 gnssfgo 内部时间帧约定一致)
         output = {
             "timestamp": fused_result.timestamp,
+            "time_frame": round(fused_result.timestamp * 10.0, 3),
             "n_total": fused_result.n_total,
             "n_trusted": fused_result.n_trusted,
             "n_suspect": fused_result.n_suspect,
@@ -153,8 +157,11 @@ class GNSSFGODataReader:
         }
 
         for sat in fused_result.satellites:
-            # 从 PRN 中提取 sat_id 整数，也保留 PRN 字符串
-            sat_id = self._prn_to_sat_id(sat.prn)
+            # 优先使用 gnssfgo 导出并直通的正确 sat_id;
+            # 仅在无 sat_id 的场景 (CSV 回放等) 回退到 PRN 反推
+            sat_id = int(getattr(sat, "sat_id", 0) or 0)
+            if sat_id <= 0:
+                sat_id = self._prn_to_sat_id(sat.prn)
             output["satellites"][str(sat_id)] = {
                 "prn": sat.prn,
                 "system": sat.system,
@@ -183,25 +190,32 @@ class GNSSFGODataReader:
     @staticmethod
     def _prn_to_sat_id(prn: str) -> int:
         """
-        将 PRN 字符串转换为 sat_id 整数
+        将 PRN 字符串转换为 gnss_comm 的 sat_id 整数 (回退路径)
 
-        例如: 'G05' → 5, 'R03' → 103, 'E01' → 201, 'C01' → 301
-        注: 实际 gnss_comm 使用的 sat 编号取决于具体系统定义。
-        这里使用 gnss_comm 的通用编号方式。
+        gnssfgo JSONL 模式下卫星的 sat_id 已随输入直通 (RawObservation.sat_id),
+        本方法仅用于无 sat_id 的 CSV 回放等场景。
+
+        与 gnss_comm 的 sat_no() 对齐 (src/gnss_comm/src/gnss_utility.cpp),
+        前提是 PRN 字符串为系统内真实 PRN (gnssfgo 导出侧已修复, 不再使用 sat % 100):
+          GPS     1-32
+          GLONASS 33-59   (32 + prn)
+          Galileo 60-97   (59 + prn)
+          BeiDou  98-160  (97 + prn)
+        例如: 'G05' → 5, 'R06' → 38, 'E07' → 66, 'C22' → 119。
         """
         if not prn or len(prn) < 2:
             return 0
         sys_char = prn[0].upper()
-        num = int(prn[1:])
-        # 与 gnss_comm 的 satno() 函数对齐:
-        # GPS: 1-32, GLO: 1-24, GAL: 1-36, BDS: 1-63
-        # 但在 gnssfgo 中 sat 编号可能包含系统前缀
+        try:
+            num = int(prn[1:])
+        except ValueError:
+            return 0
         if sys_char == 'G':
-            return num  # GPS: 1-32
+            return num       # GPS: 1-32
         elif sys_char == 'R':
-            return num  # GLONASS: 返回相同编号
+            return 32 + num  # GLONASS: 33-59
         elif sys_char == 'E':
-            return num  # Galileo: 返回相同编号
+            return 59 + num  # Galileo: 60-97
         elif sys_char == 'C':
-            return num  # BeiDou: 返回相同编号
-        return num
+            return 97 + num  # BeiDou: 98-160
+        return 0

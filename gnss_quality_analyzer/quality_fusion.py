@@ -78,17 +78,19 @@ class SatelliteQuality:
     all_flags: List[str] = field(default_factory=list)
 
     # 元数据
+    sat_id: int = 0                 # gnss_comm 卫星编号 (gnssfgo 导出直通; 0 表示未知)
     snr: float = 0.0
     elevation: float = 0.0
     azimuth: float = 0.0
     pseudorange_residual: float = 0.0
-    carrier_residual: float = 0.0  # 载波相位变化残差（dop_cp，周）
+    carrier_residual: float = 0.0  # 载波相位与多普勒积分的相干性残差（dop_cp，米）
 
     def to_dict(self) -> dict:
         """转换为字典（便于JSON序列化）"""
         return {
             "prn": self.prn,
             "system": self.system,
+            "sat_id": self.sat_id,
             "quality": round(self.quality_final, 4),
             "trust_level": self.trust_level.value,
             "details": {
@@ -207,6 +209,7 @@ class QualityFusion:
              azimuth_values: Optional[np.ndarray] = None,
              residual_values: Optional[np.ndarray] = None,
              carrier_residual_values: Optional[np.ndarray] = None,
+             sat_ids: Optional[List[int]] = None,
              ) -> FusedResult:
         """
         融合三个分析器的质量分数
@@ -225,7 +228,9 @@ class QualityFusion:
             elevation_values: (N,) 仰角（可选）
             azimuth_values: (N,) 方位角（可选）
             residual_values: (N,) 伪距残差（可选，米）
-            carrier_residual_values: (N,) 载波相位变化残差（可选，周）
+            carrier_residual_values: (N,) 载波相位与多普勒积分的相干性残差（可选，米）
+            sat_ids: (N,) gnss_comm 卫星编号（可选，gnssfgo 模式下直通回传，
+                     避免输出侧从 PRN 字符串反推出错）
 
         Returns:
             FusedResult: 融合结果
@@ -255,16 +260,44 @@ class QualityFusion:
         else:
             raise ValueError(f"Unknown fusion mode: {self.mode}")
 
+        # ---- 绝对健康度惩罚 (不随群体/历史自适应) ----
+        # 三个分析器均为相对比较机制 (与同伴比/与自己历史比/与邻居比),
+        # 共性渐变退化 (如遮挡导致的整体信号变差) 会随归一化统计和 EMA
+        # 一起漂移, 全部失明。伪距后验残差与 SNR 是不依赖参照系的绝对证据:
+        # 健康链路 |res| 中位数 ~2m、SNR 35-50; 遮挡/多径时 |res| 攀升到 5-15m。
+        if residual_values is not None and len(residual_values) == N:
+            res_abs = np.abs(np.asarray(residual_values, dtype=float))
+        else:
+            res_abs = np.zeros(N)
+        pen_res = np.clip((res_abs - 3.0) / 9.0, 0.0, 0.9)   # 3m 起罚, 12m 满
+
+        if snr_values is not None and len(snr_values) == N:
+            snr_arr = np.asarray(snr_values, dtype=float)
+            pen_snr = np.where(snr_arr > 0,
+                               np.clip((30.0 - snr_arr) / 12.0, 0.0, 0.9),
+                               0.0)                          # 30dB 起罚, 18dB 满
+        else:
+            snr_arr = np.zeros(N)
+            pen_snr = np.zeros(N)
+
+        q_final = q_final * (1.0 - pen_res) * (1.0 - pen_snr)
+        for i in range(N):
+            if res_abs[i] > 6.0:
+                temporal_flags[i].append("high_psr_residual")
+            if 0 < snr_arr[i] < 28.0:
+                temporal_flags[i].append("low_snr")
+
         # ---- 载波相位变化残差（dop_cp）硬惩罚 ----
-        # dop_cp 残差直接反映 FGO 优化后载波相位因子的符合程度。
-        # |residual| > 5 周开始惩罚，> 100 周时最多把分数压低到原来的 10%。
+        # dop_cp 残差由 gnssfgo 计算, 已统一量纲为米（λ×周数 + 几何距离变化）,
+        # 直接反映 FGO 优化后载波相位链路的符合程度。
+        # 健康链路残差为厘米级: |residual| > 0.5m 开始惩罚, > 9.5m 时最多把分数压低到原来的 10%。
         if carrier_residual_values is not None and len(carrier_residual_values) == N:
             cr = np.abs(np.asarray(carrier_residual_values, dtype=float))
-            penalty = np.clip((cr - 5.0) / 95.0, 0.0, 0.9)
+            penalty = np.clip((cr - 0.5) / 9.0, 0.0, 0.9)
             q_final = q_final * (1.0 - penalty)
-            # 极大残差（> 200 周）直接加入异常标记
+            # 极大残差（> 19m, 约合 100 个 L1 波长）直接加入异常标记
             for i in range(N):
-                if cr[i] > 200.0:
+                if cr[i] > 19.0:
                     temporal_flags[i].append("extreme_carrier_residual")
 
         # 构建每颗卫星的完整质量评估
@@ -297,6 +330,7 @@ class QualityFusion:
                 quality_final=float(q_final[i]),
                 trust_level=trust_level,
                 all_flags=all_flags,
+                sat_id=int(sat_ids[i]) if sat_ids is not None and i < len(sat_ids) else 0,
                 snr=float(snr_values[i]) if snr_values is not None else 0.0,
                 elevation=float(elevation_values[i]) if elevation_values is not None else 0.0,
                 azimuth=float(azimuth_values[i]) if azimuth_values is not None else 0.0,

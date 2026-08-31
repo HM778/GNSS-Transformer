@@ -189,7 +189,11 @@ class OSQAAnalyzer:
 
             # ========== 步骤2: 特征提取 ==========
             timestamp = raw_epoch['timestamp']
-            features, prns = self.feature_extractor.extract_batch(observations)
+            # 从记忆库的 epoch 缓冲区构建卫星仰角历史, 供特征[7] 仰角变化率使用;
+            # 不传历史时该特征恒为 0, 等于白扔一个维度
+            satellite_histories = self._build_satellite_histories()
+            features, prns = self.feature_extractor.extract_batch(
+                observations, satellite_histories)
 
             # 设置归一化统计（使用记忆库的统计）
             if self.memory.global_stats.n_updates > 10:
@@ -221,7 +225,7 @@ class OSQAAnalyzer:
 
             # ========== 步骤4: 图结构分析 ==========
             graph_result = self.graph_analyzer.analyze(
-                features_norm, elevations, azimuths, prns, residuals
+                features_norm, elevations, azimuths, prns
             )
             self._last_graph_result = graph_result  # 保存供统计使用
 
@@ -231,6 +235,8 @@ class OSQAAnalyzer:
             )
 
             # ========== 步骤6: 分数融合 ==========
+            # sat_id 直通: gnssfgo 导出的卫星编号原样回传, 输出侧不再从 PRN 反推
+            sat_ids = [int(getattr(obs, 'sat_id', 0) or 0) for obs in observations]
             fused = self.fusion.fuse(
                 timestamp=timestamp,
                 q_transformer=attn_result.quality_scores,
@@ -246,6 +252,7 @@ class OSQAAnalyzer:
                 azimuth_values=azimuths,
                 residual_values=residuals,
                 carrier_residual_values=carrier_residuals,
+                sat_ids=sat_ids,
             )
 
             # ========== 步骤7: 更新记忆库 ==========
@@ -300,6 +307,20 @@ class OSQAAnalyzer:
 
         self.stop()
 
+    def _build_satellite_histories(self) -> dict:
+        """
+        从记忆库的 epoch 环形缓冲区构建每颗卫星的 (timestamp, elevation) 历史
+
+        用于特征提取时计算仰角变化率（特征[7]）。
+        key: PRN, value: [(timestamp, elevation), ...] 按时间升序
+        """
+        histories = {}
+        for epoch in self.memory.epoch_buffer:
+            for sample in epoch.satellites:
+                histories.setdefault(sample.prn, []).append(
+                    (sample.timestamp, sample.elevation))
+        return histories
+
     def _parse_gnssfgo_epoch(self, raw_epoch: dict) -> list:
         """
         解析 gnssfgo JSONL epoch 数据为 RawObservation 列表
@@ -323,6 +344,8 @@ class OSQAAnalyzer:
                 prn=prn,
                 system=system,
                 timestamp=timestamp,
+                # gnssfgo 导出的正确 sat_id 直通到输出, 避免从 PRN 字符串反推出错
+                sat_id=int(sat_data.get('sat_id', 0)),
                 snr=float(sat_data.get('snr_l1', 0)),
                 elevation=float(sat_data.get('elevation', 0)),
                 azimuth=float(sat_data.get('azimuth', 0)),
@@ -334,7 +357,9 @@ class OSQAAnalyzer:
                 lock_count=int(sat_data.get('lock_count_l1', 0)),
                 lli_flags=int(sat_data.get('lli_l1', 0)),
                 pseudorange_residual=float(sat_data.get('psr_residual_l1', 0)),
-                carrier_residual=float(sat_data.get('tr_dd_cp_residual', 0)),
+                # dop_cp 载波相位变化残差 (gnssfgo 因子残差, 单位: 米)。
+                # TR DD CP/PR 双差残差无法计算, 已在工程中停用。
+                carrier_residual=float(sat_data.get('dop_cp_factor_residual', 0)),
             )
             observations.append(obs)
 

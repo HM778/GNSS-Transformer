@@ -89,6 +89,9 @@ class SatelliteTracker:
         self.ema_decay = ema_decay
         self.var_decay = var_decay
 
+        # 预热期更新次数: 方差估计成型前不评分
+        self.warmup_updates = 3
+
         # EMA状态
         self.ema = np.zeros(n_features)
         self.var = np.ones(n_features) * 0.1  # 初始小方差
@@ -118,8 +121,18 @@ class SatelliteTracker:
             self.total_updates = 1
             return 0.0
 
-        # 计算马氏距离（在更新前）
         diff = features - self.ema
+
+        # 预热期: 初始方差(0.01)远小于真实特征波动, 前几个历元的马氏距离
+        # 必然虚高, 直接评分会把正常卫星误判为突变。预热期内只积累统计,
+        # 方差用观测到的平方差直接积累(非EMA), 保证预热结束后尺度真实。
+        if self.total_updates <= self.warmup_updates:
+            self.ema = self.ema_decay * self.ema + (1.0 - self.ema_decay) * features
+            self.var = self.var + (diff ** 2) / self.warmup_updates
+            self.total_updates += 1
+            return 0.0
+
+        # 计算马氏距离（在更新前）
         mahalanobis = np.sum((diff ** 2) / (self.var + 1e-8)) / self.n_features
 
         # 更新EMA

@@ -64,7 +64,10 @@ transformer_analyzer.py — Transformer自注意力信号质量分析器
      for each 卫星i:
        memory_sim[i] = max(cosine_similarity(features[i], prototype) for prototype in memory)
   6. 质量分数:
-     quality[i] = sigmoid(attended_by[i] * (1-entropy[i]/max_entropy) * memory_sim[i])
+     ratio[i] = attended_by[i] * N      # 均匀注意力(健康) ≈ 1
+     quality[i] = sqrt(clip(ratio[i]) * memory_sim[i])
+     # 熵只作为相对标记(显著比同伴更均匀), 不参与打分:
+     # 健康卫星注意力天然接近均匀、熵必然接近最大值, 不能当作异常惩罚
 """
 
 import numpy as np
@@ -165,8 +168,8 @@ class TransformerAnalyzer:
       低 → 这颗卫星与众不同 → 可疑
 
     - attention_entropy: 这颗卫星对其他卫星的关注分布熵
-      低 → 它只关注少数几颗卫星 → 偏好明确 → 正常
-      高 → 它对所有卫星都平均关注 → 没有明确偏好 → 可能自己特征异常
+      注意: 健康卫星彼此特征相似, 注意力天然接近均匀分布, 熵必然接近最大值,
+      因此熵高不是异常信号, 不参与打分; 只有显著偏离同伴中位数时才标记。
 
     - memory_similarity: 与记忆中"好信号"的相似度
       高 → 和历史好信号很像 → 可信
@@ -293,34 +296,33 @@ class TransformerAnalyzer:
         quality_scores = np.zeros(N)
         anomaly_flags = [[] for _ in range(N)]
 
+        # 熵基线（相对校准）: 健康卫星彼此特征相似 → 注意力天然接近均匀分布
+        # → 熵必然接近最大值。熵高本身不是异常——旧实现用 1 - H/log(N-1) 参与打分,
+        # 把"正常"状态罚到 ≈0, 是全部卫星饱和在 suspect 区间的主因。
+        # 因此熵不再参与打分, 只把"显著比同伴更均匀"作为标记保留。
+        valid_entropies = attention_entropy[mask]
+        entropy_baseline = float(np.median(valid_entropies)) if len(valid_entropies) > 0 else 0.0
+
         for i in range(N):
             if not mask[i]:
                 quality_scores[i] = 0.0
                 anomaly_flags[i].append("invalid")
                 continue
 
-            # 综合三个指标计算质量分数
-            # 被关注度高 → 好
-            # 熵低（偏好明确）→ 好
-            # 记忆相似度高 → 好
-            #
-            # 被关注度缩放：attended_by_others ≈ 1/N（均匀注意力时）
-            # 所以将其乘以N/2来校准，使"均匀被关注"的卫星得分约0.5
-            # 被关注度高于均匀水平 → 得分>0.5, 低于均匀水平 → 得分<0.5
-            score_attention = np.clip(attended_by_others[i] * N / 2.0, 0.0, 1.0)
-            score_entropy = 1.0 - attention_entropy[i]
+            # 被关注度校准: 均匀注意力时 attended_by ≈ 1/N, 这是群体一致的健康状态。
+            # ratio = attended_by × N ≈ 1 表示与群体一致, 被孤立时 ratio 明显 < 1。
+            # 旧实现 attended_by × N / 2 把健康状态钉在 0.5, 同样系统性偏低。
+            attention_ratio = attended_by_others[i] * N
+            score_attention = np.clip(attention_ratio, 0.0, 1.0)
             score_memory = np.clip(memory_similarity[i], 0.0, 1.0)
 
-            # 几何平均融合（类似trbin的pow(p_rel, 1/6)）
-            # 优点：不会因为一个指标稍低就过度惩罚
-            quality_scores[i] = np.power(
-                score_attention * score_entropy * score_memory, 1.0 / 3.0
-            )
+            # 两项几何平均: 群体一致性 × 记忆相似度
+            quality_scores[i] = np.sqrt(score_attention * score_memory)
 
             # 异常标记
             if score_attention < 0.3:
                 anomaly_flags[i].append("low_attention")
-            if attention_entropy[i] > 0.7:
+            if attention_entropy[i] - entropy_baseline > 0.2:
                 anomaly_flags[i].append("high_entropy")
             if score_memory < 0.3:
                 anomaly_flags[i].append("low_memory_similarity")

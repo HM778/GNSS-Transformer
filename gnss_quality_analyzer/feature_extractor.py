@@ -51,6 +51,7 @@ class RawObservation:
     snr: float              # 信噪比 (dB-Hz)，范围通常15-55
     elevation: float        # 仰角（度），0(地平线)-90(天顶)
     azimuth: float          # 方位角（度），0-360
+    sat_id: int = 0         # gnss_comm 卫星编号 (gnssfgo 导出直通; 0 表示未知)
 
     # 观测量（L1/L2）
     pseudorange_l1: float = 0.0   # L1伪距（米）
@@ -158,12 +159,12 @@ class FeatureExtractor:
         # 残差通常在[-20, 20]米范围内，除以20做初步缩放
         features[4] = obs.pseudorange_residual / 20.0
 
-        # [5] 载波相位变化残差（dop_cp，单位：周）
-        # 正常载波相位变化残差在 [-10, 10] 周以内，极端野值可达数百万周。
-        # 这里先做硬截断，再按 50 周归一化到 [-1, 1]。
+        # [5] 载波相位变化残差（dop_cp，单位：米，与伪距残差量纲统一）
+        # 健康链路残差在厘米级，周跳表现为波长(约0.19m)整数倍的跳变。
+        # 按 5 米截断并归一化到 [-1, 1]，只在真实野值处饱和。
         if obs.has_carrier_phase:
-            cr = np.clip(obs.carrier_residual, -50.0, 50.0)
-            features[5] = cr / 50.0
+            cr = np.clip(obs.carrier_residual, -5.0, 5.0)
+            features[5] = cr / 5.0
         else:
             features[5] = 0.0  # 不可用时置零
 
@@ -265,8 +266,8 @@ class FeatureExtractor:
 
         Args:
             sat_data: gnssfgo 导出的单颗卫星数据字典 (JSON 解析后的 dict)
-                      包含: snr_l1, elevation, azimuth, psr_residual_l1,
-                      tr_dd_cp_residual, lock_count_l1 等字段
+                      包含: snr_l1, elevation, azimuth, psr_factor_residual,
+                      dop_cp_factor_residual, lock_count_l1 等字段
             prev_elevation: 该卫星上一 epoch 的仰角（用于计算变化率），可选
             dt: 时间间隔（秒），用于计算变化率，可选
 
@@ -290,15 +291,14 @@ class FeatureExtractor:
         features[3] = np.sin(azim_rad)
 
         # [4] pseudorange_residual: SPP 伪距残差 (已由 gnssfgo 计算)
-        psr_res = float(sat_data.get('psr_residual_l1', 0))
+        psr_res = float(sat_data.get('psr_factor_residual', 0))
         features[4] = psr_res / 20.0
 
-        # [5] carrier_residual: 使用 TR DD 载波残差 (gnssfgo 因子残差)
-        # 或伪距因子后验残差
-        cp_res = float(sat_data.get('tr_dd_cp_residual', 0))
-        if cp_res == 0.0:
-            cp_res = float(sat_data.get('psr_factor_residual', 0))
-        features[5] = cp_res / 0.1
+        # [5] carrier_residual: dop_cp 载波相位变化残差 (gnssfgo 因子残差, 单位: 米)
+        # 与伪距残差量纲统一; 残差为 0 表示上一历元无观测、无法计算, 保持中性置零,
+        # 不要回退到伪距残差(两者尺度相差 1-2 个数量级, 混用会污染该特征)。
+        cp_res = float(sat_data.get('dop_cp_factor_residual', 0))
+        features[5] = np.clip(cp_res, -5.0, 5.0) / 5.0
 
         # [6] lock_count_norm: 使用 gnssfgo 统计的 L1 锁定计数
         lock = float(sat_data.get('lock_count_l1', 0))

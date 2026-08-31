@@ -245,13 +245,14 @@ class GraphAnalyzer:
         Args:
             elevation_threshold: 图边构建的仰角阈值（度）
             azimuth_threshold: 图边构建的方位角阈值（度）
-            consistency_temperature: 一致性检查的温度参数
+            consistency_temperature: 已废弃（保留以兼容既有配置）——
+                一致性评分改为按本历元误差中位数自校准
             num_layers: GCN层数
             position_encoding_dim: 位置编码维度
         """
         self.elevation_threshold = elevation_threshold
         self.azimuth_threshold = azimuth_threshold
-        self.consistency_temperature = consistency_temperature
+        self.consistency_temperature = consistency_temperature  # 已废弃, 仅保留兼容
         self.num_layers = num_layers
 
         # 子模块
@@ -267,8 +268,7 @@ class GraphAnalyzer:
     def analyze(self, features: np.ndarray,
                 elevations: np.ndarray,
                 azimuths: np.ndarray,
-                prns: List[str],
-                pseudorange_residuals: Optional[np.ndarray] = None
+                prns: List[str]
                 ) -> GraphResult:
         """
         对一帧epoch进行图结构几何分析
@@ -278,7 +278,6 @@ class GraphAnalyzer:
             elevations: (N,) 仰角（度）
             azimuths: (N,) 方位角（度）
             prns: 卫星PRN列表
-            pseudorange_residuals: (N,) 伪距残差（可选，用于更好的异常判断）
 
         Returns:
             GraphResult: 图分析结果
@@ -319,7 +318,6 @@ class GraphAnalyzer:
 
         consistency_error = np.zeros(N)
         neighbor_consensus = np.zeros(N)
-        quality_scores = np.zeros(N)
         anomaly_flags = [[] for _ in range(N)]
 
         for i in range(N):
@@ -336,11 +334,26 @@ class GraphAnalyzer:
             else:
                 neighbor_consensus[i] = 0.5  # 无邻居时给中间值
 
-            # 质量分数：一致性误差的指数衰减
-            quality_scores[i] = np.exp(-consistency_error[i] / self.consistency_temperature)
+        # 质量分数：相对一致性校准
+        # z-score 特征空间里卫星间特征天然相差 ~1 个标准差, GCN 聚合必然把节点
+        # 拉向邻居, 绝对一致性误差存在非零的"正常地板"。旧实现 exp(-err/T) 的固定
+        # 温度(0.5-0.9)与该地板不在同一标定体系, 健康卫星也被系统性压到 0.3-0.6。
+        # 改为以本历元非零误差的中位数为基准: 误差不超过同伴的卫星得满分,
+        # 显著偏离同伴的才降分 —— 本分析器的职责是找出"离群者"。
+        # 基准只统计非零误差, 避免孤立节点(err=0)把基准拉到 0。
+        nonzero_errs = consistency_error[consistency_error > 1e-6]
+        err_ref = float(np.median(nonzero_errs)) if len(nonzero_errs) >= 3 else 0.0
 
-            # 异常标记
-            if consistency_error[i] > 2.0 * self.consistency_temperature:
+        quality_scores = np.ones(N)
+        for i in range(N):
+            if err_ref > 1e-6:
+                # 斜率取 0.5: 误差为基准 2 倍 → 0.61, 3 倍 → 0.37, 5 倍 → 0.14,
+                # 在保留离群判别力的同时降低健康卫星的相对噪声
+                excess = max(0.0, (consistency_error[i] - err_ref) / err_ref)
+                quality_scores[i] = np.exp(-0.5 * excess)
+
+            neighbors = self.graph_builder.get_neighbors(i, adjacency)
+            if consistency_error[i] > 3.0 * max(err_ref, 1e-6):
                 anomaly_flags[i].append("graph_inconsistent")
             if len(neighbors) == 0:
                 anomaly_flags[i].append("no_graph_neighbors")
